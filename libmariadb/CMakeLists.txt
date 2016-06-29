@@ -10,7 +10,7 @@ ELSE()
  # Building from git, use git to get Connector/C
  SET(GIT_PARAMS 
   GIT_REPOSITORY "https://github.com/MariaDB/mariadb-connector-c/"
-  GIT_TAG "master"
+  GIT_TAG "server-integ"
  )
  SET(CONNECTOR_C_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/mariadb-connector-c-src)
 ENDIF()
