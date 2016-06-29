@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2015, MariaDB
+   Copyright (c) 2008, 2016, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -292,9 +292,8 @@ handle_slave_init(void *arg __attribute__((unused)))
   THD *thd;
 
   my_thread_init();
-  thd= new THD;
+  thd= new THD(next_thread_id());
   thd->thread_stack= (char*) &thd;           /* Set approximate stack start */
-  thd->thread_id= next_thread_id();
   thd->system_thread = SYSTEM_THREAD_SLAVE_INIT;
   thread_safe_increment32(&service_thread_count);
   thd->store_globals();
@@ -3071,7 +3070,6 @@ static int init_slave_thread(THD* thd, Master_info *mi,
   thd->variables.log_slow_filter= global_system_variables.log_slow_filter;
   set_slave_thread_options(thd);
   thd->client_capabilities = CLIENT_LOCAL_FILES;
-  thd->thread_id= thd->variables.pseudo_thread_id= next_thread_id();
 
   if (thd_type == SLAVE_THD_SQL)
     THD_STAGE_INFO(thd, stage_waiting_for_the_next_event_in_relay_log);
@@ -3938,7 +3936,7 @@ pthread_handler_t handle_slave_io(void *arg)
   mysql= NULL ;
   retry_count= 0;
 
-  thd= new THD; // note that contructor of THD uses DBUG_ !
+  thd= new THD(next_thread_id()); // note that contructor of THD uses DBUG_ !
 
   mysql_mutex_lock(&mi->run_lock);
   /* Inform waiting threads that slave has started */
@@ -4508,7 +4506,7 @@ pthread_handler_t handle_slave_sql(void *arg)
 #endif
 
   serial_rgi= new rpl_group_info(rli);
-  thd = new THD; // note that contructor of THD uses DBUG_ !
+  thd = new THD(next_thread_id()); // note that contructor of THD uses DBUG_ !
   thd->thread_stack = (char*)&thd; // remember where our stack is
   thd->system_thread_info.rpl_sql_info= &sql_info;
 
@@ -4893,8 +4891,11 @@ err_during_init:
   /*
     TODO: see if we can do this conditionally in next_event() instead
     to avoid unneeded position re-init
+
+    We only reset THD::temporary_tables to 0 here and not free it, as this
+    could be used by slave through Relay_log_info::save_temporary_tables.
   */
-  thd->temporary_tables = 0; // remove tempation from destructor to close them
+  thd->temporary_tables= 0;
   rli->sql_driver_thd= 0;
   thd->rgi_fake= thd->rgi_slave= NULL;
 

@@ -2624,7 +2624,7 @@ int select_result_explain_buffer::send_data(List<Item> &items)
   DBUG_ENTER("select_result_explain_buffer::send_data");
 
   /*
-    Switch to the recieveing thread, so that we correctly count memory used
+    Switch to the receiveing thread, so that we correctly count memory used
     by it. This is needed as it's the receiving thread that will free the
     memory.
   */
@@ -4155,7 +4155,7 @@ fill_schema_table_by_open(THD *thd, bool is_show_fields_or_keys,
     'only_view_structure()'.
   */
   lex->sql_command= SQLCOM_SHOW_FIELDS;
-  result= (open_temporary_tables(thd, table_list) ||
+  result= (thd->open_temporary_tables(table_list) ||
            open_normal_and_derived_tables(thd, table_list,
                                           (MYSQL_OPEN_IGNORE_FLUSH |
                                            MYSQL_OPEN_FORCE_SHARED_HIGH_PRIO_MDL |
@@ -4218,6 +4218,7 @@ end:
     all tables open within this Open_tables_state.
   */
   thd->temporary_tables= NULL;
+
   close_thread_tables(thd);
   /*
     Release metadata lock we might have acquired.
@@ -8778,7 +8779,7 @@ ST_FIELD_INFO processlist_fields_info[]=
   {"MAX_STAGE", 2, MYSQL_TYPE_TINY,  0, 0, "Max_stage", SKIP_OPEN_TABLE},
   {"PROGRESS", 703, MYSQL_TYPE_DECIMAL,  0, 0, "Progress",
    SKIP_OPEN_TABLE},
-  {"MEMORY_USED", 7, MYSQL_TYPE_LONG, 0, 0, "Memory_used", SKIP_OPEN_TABLE},
+  {"MEMORY_USED", 7, MYSQL_TYPE_LONGLONG, 0, 0, "Memory_used", SKIP_OPEN_TABLE},
   {"EXAMINED_ROWS", 7, MYSQL_TYPE_LONG, 0, 0, "Examined_rows", SKIP_OPEN_TABLE},
   {"QUERY_ID", 4, MYSQL_TYPE_LONGLONG, 0, 0, 0, SKIP_OPEN_TABLE},
   {"INFO_BINARY", PROCESS_LIST_INFO_WIDTH, MYSQL_TYPE_BLOB, 0, 1,

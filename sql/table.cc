@@ -279,7 +279,8 @@ TABLE_CATEGORY get_table_category(const LEX_STRING *db, const LEX_STRING *name)
 
   SYNOPSIS
     alloc_table_share()
-    TABLE_LIST		Take database and table name from there
+    db                  Database name
+    table_name          Table name
     key			Table cache key (db \0 table_name \0...)
     key_length		Length of key
 
@@ -1631,6 +1632,10 @@ int TABLE_SHARE::init_from_binary_frm_image(THD *thd, bool write,
         charset= share->table_charset;
       bzero((char*) &comment, sizeof(comment));
     }
+
+    /* Remove >32 decimals from old files */
+    if (share->mysql_version < 100200)
+      pack_flag&= ~(FIELDFLAG_LEFT_FULLSCREEN);
 
     if (interval_nr && charset->mbminlen > 1)
     {
@@ -3020,21 +3025,16 @@ partititon_err:
   SYNOPSIS
     closefrm()
     table		TABLE object to free
-    free_share		Is 1 if we also want to free table_share
 */
 
-int closefrm(register TABLE *table, bool free_share)
+int closefrm(register TABLE *table)
 {
   int error=0;
   DBUG_ENTER("closefrm");
   DBUG_PRINT("enter", ("table: 0x%lx", (long) table));
 
   if (table->db_stat)
-  {
-    if (table->s->deleting)
-      table->file->extra(HA_EXTRA_PREPARE_FOR_DROP);
     error=table->file->ha_close();
-  }
   table->alias.free();
   if (table->expr_arena)
     table->expr_arena->free_items();
@@ -3057,13 +3057,6 @@ int closefrm(register TABLE *table, bool free_share)
     table->part_info= 0;
   }
 #endif
-  if (free_share)
-  {
-    if (table->s->tmp_table == NO_TMP_TABLE)
-      tdc_release_share(table->s);
-    else
-      free_table_share(table->s);
-  }
   free_root(&table->mem_root, MYF(0));
   DBUG_RETURN(error);
 }
@@ -3933,7 +3926,7 @@ bool TABLE_SHARE::visit_subgraph(Wait_for_flush *wait_for_flush,
   tdc->all_tables_refs++;
   mysql_mutex_unlock(&tdc->LOCK_table_share);
 
-  TDC_element::All_share_tables_list::Iterator tables_it(tdc->all_tables);
+  All_share_tables_list::Iterator tables_it(tdc->all_tables);
 
   /*
     In case of multiple searches running in parallel, avoid going

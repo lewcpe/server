@@ -36,8 +36,6 @@
   - get number of TABLE objects in cache (tc_records())
 
   Dependencies:
-  - intern_close_table(): frees TABLE object
-  - kill_delayed_threads_for_table()
   - close_cached_tables(): flush tables on shutdown
   - alloc_table_share()
   - free_table_share()
@@ -126,6 +124,25 @@ static int fix_thd_pins(THD *thd)
   In fact those routines implement sort of implicit table cache as
   part of table definition cache.
 */
+
+static void intern_close_table(TABLE *table)
+{
+  DBUG_ENTER("intern_close_table");
+  DBUG_PRINT("tcache", ("table: '%s'.'%s' 0x%lx",
+                        table->s ? table->s->db.str : "?",
+                        table->s ? table->s->table_name.str : "?",
+                        (long) table));
+
+  delete table->triggers;
+  if (table->file)                              // Not true if placeholder
+  {
+    (void) closefrm(table);
+    tdc_release_share(table->s);
+  }
+  table->alias.free();
+  my_free(table);
+  DBUG_VOID_RETURN;
+}
 
 
 /**
@@ -724,10 +741,9 @@ void tdc_unlock_share(TDC_element *element)
 
   tdc_acquire_share()
   thd                   Thread handle
-  table_list            Table that should be opened
-  key                   Table cache key
-  key_length            Length of key
+  tl                    Table that should be opened
   flags                 operation: what to open table or view
+  out_table             TABLE for the requested table
 
   IMPLEMENTATION
     Get a table definition from the table definition cache.
@@ -939,6 +955,47 @@ void tdc_release_share(TABLE_SHARE *share)
 
 
 /**
+   Auxiliary function which allows to kill delayed threads for
+   particular table identified by its share.
+
+   @param share Table share.
+
+   @pre Caller should have TABLE_SHARE::tdc.LOCK_table_share mutex.
+*/
+
+static void kill_delayed_threads_for_table(TDC_element *element)
+{
+  All_share_tables_list::Iterator it(element->all_tables);
+  TABLE *tab;
+
+  mysql_mutex_assert_owner(&element->LOCK_table_share);
+
+  if (!delayed_insert_threads)
+    return;
+
+  while ((tab= it++))
+  {
+    THD *in_use= tab->in_use;
+
+    DBUG_ASSERT(in_use && tab->s->tdc->flushed);
+    if ((in_use->system_thread & SYSTEM_THREAD_DELAYED_INSERT) &&
+        ! in_use->killed)
+    {
+      in_use->killed= KILL_SYSTEM_THREAD;
+      mysql_mutex_lock(&in_use->mysys_var->mutex);
+      if (in_use->mysys_var->current_cond)
+      {
+        mysql_mutex_lock(in_use->mysys_var->current_mutex);
+        mysql_cond_broadcast(in_use->mysys_var->current_cond);
+        mysql_mutex_unlock(in_use->mysys_var->current_mutex);
+      }
+      mysql_mutex_unlock(&in_use->mysys_var->mutex);
+    }
+  }
+}
+
+
+/**
    Remove all or some (depending on parameter) instances of TABLE and
    TABLE_SHARE from the table definition cache.
 
@@ -1029,7 +1086,7 @@ bool tdc_remove_table(THD *thd, enum_tdc_remove_table_type remove_type,
   if (remove_type == TDC_RT_REMOVE_NOT_OWN ||
       remove_type == TDC_RT_REMOVE_NOT_OWN_KEEP_SHARE)
   {
-    TDC_element::All_share_tables_list::Iterator it(element->all_tables);
+    All_share_tables_list::Iterator it(element->all_tables);
     while ((table= it++))
     {
       my_refs++;

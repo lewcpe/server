@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2015, MariaDB
+   Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -2041,7 +2041,8 @@ public:
   MDL_request grl_protection;
 
   Delayed_insert(SELECT_LEX *current_select)
-    :locks_in_memory(0), table(0),tables_in_use(0),stacked_inserts(0),
+    :locks_in_memory(0), thd(next_thread_id()),
+     table(0),tables_in_use(0), stacked_inserts(0),
      status(0), retry(0), handler_thread_initialized(FALSE), group_count(0)
   {
     DBUG_ENTER("Delayed_insert constructor");
@@ -2072,7 +2073,6 @@ public:
     delayed_lock= global_system_variables.low_priority_updates ?
                                           TL_WRITE_LOW_PRIORITY : TL_WRITE;
     mysql_mutex_unlock(&LOCK_thread_count);
-    thread_safe_increment32(&thread_count);
     DBUG_VOID_RETURN;
   }
   ~Delayed_insert()
@@ -2103,7 +2103,6 @@ public:
     my_free(thd.query());
     thd.security_ctx->user= 0;
     thd.security_ctx->host= 0;
-    dec_thread_count();
   }
 
   /* The following is for checking when we can delete ourselves */
@@ -2819,7 +2818,6 @@ pthread_handler_t handle_delayed_insert(void *arg)
 
   pthread_detach_this_thread();
   /* Add thread to THD list so that's it's visible in 'show processlist' */
-  thd->thread_id= thd->variables.pseudo_thread_id= next_thread_id();
   thd->set_current_time();
   add_to_active_threads(thd);
   if (abort_loop)
@@ -4080,7 +4078,12 @@ static TABLE *create_table_from_items(THD *thd,
     }
     else
     {
-      if (open_temporary_table(thd, create_table))
+      /*
+        The pointer to the newly created temporary table has been stored in
+        table->create_info.
+      */
+      create_table->table= create_info->table;
+      if (!create_table->table)
       {
         /*
           This shouldn't happen as creation of temporary table should make
@@ -4089,7 +4092,6 @@ static TABLE *create_table_from_items(THD *thd,
         */
         DBUG_ASSERT(0);
       }
-      DBUG_ASSERT(create_table->table == create_info->table);
     }
   }
   else
@@ -4224,6 +4226,18 @@ select_create::prepare(List<Item> &values, SELECT_LEX_UNIT *u)
     /* abort() deletes table */
     DBUG_RETURN(-1);
 
+  if (create_info->tmp_table())
+  {
+    /*
+      When the temporary table was created & opened in create_table_impl(),
+      the table's TABLE_SHARE (and thus TABLE) object was also linked to THD
+      temporary tables lists. So, we must temporarily remove it from the
+      list to keep them inaccessible from inner statements.
+      e.g. CREATE TEMPORARY TABLE `t1` AS SELECT * FROM `t1`;
+    */
+    saved_tmp_table_share= thd->save_tmp_table_share(create_table->table);
+  }
+
   if (extra_lock)
   {
     DBUG_ASSERT(m_plock == NULL);
@@ -4337,6 +4351,27 @@ bool select_create::send_eof()
   {
     abort_result_set();
     DBUG_RETURN(true);
+  }
+
+  if (table->s->tmp_table)
+  {
+    /*
+      Now is good time to add the new table to THD temporary tables list.
+      But, before that we need to check if same table got created by the sub-
+      statement.
+    */
+    if (thd->find_tmp_table_share(table->s->table_cache_key.str,
+                                  table->s->table_cache_key.length))
+    {
+      my_error(ER_TABLE_EXISTS_ERROR, MYF(0), table->alias.c_ptr());
+      abort_result_set();
+      DBUG_RETURN(true);
+    }
+    else
+    {
+      DBUG_ASSERT(saved_tmp_table_share);
+      thd->restore_tmp_table_share(saved_tmp_table_share);
+    }
   }
 
   /*
@@ -4463,6 +4498,13 @@ void select_create::abort_result_set()
   if (table)
   {
     bool tmp_table= table->s->tmp_table;
+
+    if (tmp_table)
+    {
+      DBUG_ASSERT(saved_tmp_table_share);
+      thd->restore_tmp_table_share(saved_tmp_table_share);
+    }
+
     table->file->extra(HA_EXTRA_NO_IGNORE_DUP_KEY);
     table->file->extra(HA_EXTRA_WRITE_CANNOT_REPLACE);
     table->auto_increment_field_not_null= FALSE;

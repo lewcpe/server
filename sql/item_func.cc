@@ -646,14 +646,15 @@ void Item_func::count_real_length(Item **items, uint nitems)
   unsigned_flag= false;
   for (uint i=0 ; i < nitems ; i++)
   {
-    if (decimals != NOT_FIXED_DEC)
+    if (decimals < FLOATING_POINT_DECIMALS)
     {
       set_if_bigger(decimals, items[i]->decimals);
+      /* Will be ignored if items[i]->decimals >= FLOATING_POINT_DECIMALS */
       set_if_bigger(length, (items[i]->max_length - items[i]->decimals));
     }
     set_if_bigger(max_length, items[i]->max_length);
   }
-  if (decimals != NOT_FIXED_DEC)
+  if (decimals < FLOATING_POINT_DECIMALS)
   {
     max_length= length;
     length+= decimals;
@@ -4903,7 +4904,7 @@ Item_func_set_user_var::update_hash(void *ptr, uint length,
                                     bool unsigned_arg)
 {
   /*
-    If we set a variable explicitely to NULL then keep the old
+    If we set a variable explicitly to NULL then keep the old
     result type of the variable
   */
   if (args[0]->type() == Item::FIELD_ITEM)

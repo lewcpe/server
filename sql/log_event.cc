@@ -6159,7 +6159,7 @@ int Load_log_event::do_apply_event(NET* net, rpl_group_info *rgi,
         update it inside mysql_load().
       */
       List<Item> tmp_list;
-      if (open_temporary_tables(thd, &tables) ||
+      if (thd->open_temporary_tables(&tables) ||
           mysql_load(thd, &ex, &tables, field_list, tmp_list, tmp_list,
                      handle_dup, ignore, net != 0))
         thd->is_slave_error= 1;
@@ -8017,7 +8017,7 @@ void User_var_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
         return;
       str_to_hex(hex_str, val, val_len);
       /*
-        For proper behaviour when mysqlbinlog|mysql, we need to explicitely
+        For proper behaviour when mysqlbinlog|mysql, we need to explicitly
         specify the variable's collation. It will however cause problems when
         people want to mysqlbinlog|mysql into another server not supporting the
         character set. But there's not much to do about this and it's unlikely.

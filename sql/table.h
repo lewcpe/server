@@ -2,6 +2,7 @@
 #define TABLE_INCLUDED
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
    Copyright (c) 2009, 2014, SkySQL Ab.
+   Copyright (c) 2016, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -673,7 +674,6 @@ struct TABLE_SHARE
   bool crypted;                         /* If .frm file is crypted */
   bool crashed;
   bool is_view;
-  bool deleting;                        /* going to delete this table */
   bool can_cmp_whole_record;
   bool table_creation_was_logged;
   ulong table_map_id;                   /* for row-based replication */
@@ -968,7 +968,7 @@ public:
      @param length         string length
 
      @retval Pointer to the copied string.
-     @retval 0 if an error occured.
+     @retval 0 if an error occurred.
   */
   char *store(const char *from, uint length)
   {
@@ -1013,7 +1013,7 @@ private:
      One should use methods of I_P_List template instead.
   */
   TABLE *share_all_next, **share_all_prev;
-  friend struct TDC_element;
+  friend struct All_share_tables;
 
 public:
 
@@ -1436,6 +1436,19 @@ struct TABLE_share
   }
 };
 
+struct All_share_tables
+{
+  static inline TABLE **next_ptr(TABLE *l)
+  {
+    return &l->share_all_next;
+  }
+  static inline TABLE ***prev_ptr(TABLE *l)
+  {
+    return &l->share_all_prev;
+  }
+};
+
+typedef I_P_List <TABLE, All_share_tables> All_share_tables_list;
 
 enum enum_schema_table_state
 { 
@@ -2018,8 +2031,6 @@ struct TABLE_LIST
       qualified name (<db_name>.<table_name>).
   */
   bool          is_fqtn;
-
-  bool          deleting;               /* going to delete this table */
 
   /* TRUE <=> derived table should be filled right after optimization. */
   bool          fill_me;
@@ -2621,7 +2632,7 @@ bool get_field(MEM_ROOT *mem, Field *field, class String *res);
 bool validate_comment_length(THD *thd, LEX_STRING *comment, size_t max_len,
                              uint err_code, const char *name);
 
-int closefrm(TABLE *table, bool free_share);
+int closefrm(TABLE *table);
 void free_blobs(TABLE *table);
 void free_field_buffers_larger_than(TABLE *table, uint32 size);
 ulong get_form_pos(File file, uchar *head, TYPELIB *save_names);
@@ -2664,15 +2675,6 @@ inline bool is_infoschema_db(const char *name)
 }
 
 TYPELIB *typelib(MEM_ROOT *mem_root, List<String> &strings);
-
-/**
-  return true if the table was created explicitly.
-*/
-inline bool is_user_table(TABLE * table)
-{
-  const char *name= table->s->table_name.str;
-  return strncmp(name, tmp_file_prefix, tmp_file_prefix_length);
-}
 
 inline void mark_as_null_row(TABLE *table)
 {

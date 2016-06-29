@@ -37,7 +37,7 @@
 #include "tztime.h"                           // MYSQL_TIME <-> my_time_t
 #include "sql_acl.h"                          // NO_ACCESS,
                                               // acl_getroot_no_password
-#include "sql_base.h"                         // close_temporary_tables
+#include "sql_base.h"
 #include "sql_handler.h"                      // mysql_ha_cleanup
 #include "rpl_rli.h"
 #include "rpl_filter.h"
@@ -337,17 +337,6 @@ void thd_set_killed(THD *thd)
 }
 
 /**
-  Clear errors from the previous THD
-
-  @param thd              THD object
-*/
-void thd_clear_errors(THD *thd)
-{
-  my_errno= 0;
-  thd->mysys_var->abort= 0;
-}
-
-/**
   Set thread stack in THD object
 
   @param thd              Thread object
@@ -456,7 +445,7 @@ my_socket thd_get_fd(THD *thd)
 {
   return mysql_socket_getfd(thd->net.vio->mysql_socket);
 }
-#endif
+#endif /* ONLY_FOR_MYSQL_CLOSED_SOURCE_SCHEDULED */
 
 /**
   Get current THD object from thread local data
@@ -467,6 +456,18 @@ THD *thd_get_current_thd()
 {
   return current_thd;
 }
+
+/**
+  Clear errors from the previous THD
+
+  @param thd              THD object
+*/
+void thd_clear_errors(THD *thd)
+{
+  my_errno= 0;
+  thd->mysys_var->abort= 0;
+}
+
 
 /**
   Get thread attributes for connection threads
@@ -845,7 +846,7 @@ extern "C" void thd_kill_timeout(THD* thd)
 }
 
 
-THD::THD(bool is_wsrep_applier)
+THD::THD(my_thread_id id, bool is_wsrep_applier)
   :Statement(&main_lex, &main_mem_root, STMT_CONVENTIONAL_EXECUTION,
              /* statement id */ 0),
    rli_fake(0), rgi_fake(0), rgi_slave(NULL),
@@ -854,17 +855,13 @@ THD::THD(bool is_wsrep_applier)
    binlog_unsafe_warning_flags(0),
    binlog_table_maps(0),
    table_map_for_update(0),
-   arg_of_last_insert_id_function(FALSE),
-   first_successful_insert_id_in_prev_stmt(0),
-   first_successful_insert_id_in_prev_stmt_for_binlog(0),
-   first_successful_insert_id_in_cur_stmt(0),
-   stmt_depends_on_first_successful_insert_id_in_prev_stmt(FALSE),
    m_examined_row_count(0),
    accessed_rows_and_keys(0),
    m_digest(NULL),
    m_statement_psi(NULL),
    m_idle_psi(NULL),
-   thread_id(0),
+   thread_id(id),
+   thread_dbug_id(id),
    os_thread_id(0),
    global_disable_checkpoint(0),
    failed_com_change_user(0),
@@ -886,7 +883,8 @@ THD::THD(bool is_wsrep_applier)
    main_da(0, false, false),
    m_stmt_da(&main_da),
    tdc_hash_pins(0),
-   xid_hash_pins(0)
+   xid_hash_pins(0),
+   m_tmp_tables_locked(false)
 #ifdef WITH_WSREP
   ,
    wsrep_applier(is_wsrep_applier),
@@ -910,6 +908,7 @@ THD::THD(bool is_wsrep_applier)
   set_current_thd(this);
   status_var.local_memory_used= sizeof(THD);
   status_var.global_memory_used= 0;
+  variables.pseudo_thread_id= thread_id;
   main_da.init();
 
   /*
@@ -947,7 +946,6 @@ THD::THD(bool is_wsrep_applier)
   statement_id_counter= 0UL;
   // Must be reset to handle error with THD's created for init of mysqld
   lex->current_select= 0;
-  user_time.val= start_time= start_time_sec_part= 0;
   start_utime= utime_after_query= 0;
   utime_after_lock= 0L;
   progress.arena= 0;
@@ -973,14 +971,12 @@ THD::THD(bool is_wsrep_applier)
 #ifndef DBUG_OFF
   dbug_sentry=THD_SENTRY_MAGIC;
 #endif
-#ifndef EMBEDDED_LIBRARY
   mysql_audit_init_thd(this);
-#endif
   net.vio=0;
   net.buff= 0;
   client_capabilities= 0;                       // minimalistic client
   system_thread= NON_SYSTEM_THREAD;
-  cleanup_done= abort_on_warning= 0;
+  cleanup_done= free_connection_done= abort_on_warning= 0;
   peer_port= 0;					// For SHOW PROCESSLIST
   transaction.m_pending_rows_event= 0;
   transaction.on= 1;
@@ -1003,7 +999,6 @@ THD::THD(bool is_wsrep_applier)
   /* Variables with default values */
   proc_info="login";
   where= THD::DEFAULT_WHERE;
-  variables.server_id = global_system_variables.server_id;
   slave_net = 0;
   m_command=COM_CONNECT;
   *scramble= '\0';
@@ -1064,7 +1059,6 @@ THD::THD(bool is_wsrep_applier)
   tmp= (ulong) (my_rnd(&sql_rand) * 0xffffffff);
   my_rnd_init(&rand, tmp + (ulong) &rand, tmp + (ulong) ::global_query_id);
   substitute_null_with_insert_id = FALSE;
-  thr_lock_info_init(&lock_info); /* safety: will be reset after start */
   lock_info.mysql_thd= (void *)this;
 
   m_token_array= NULL;
@@ -1084,6 +1078,7 @@ THD::THD(bool is_wsrep_applier)
   save_prep_leaf_list= FALSE;
   /* Restore THR_THD */
   set_current_thd(old_THR_THD);
+  inc_thread_count();
 }
 
 
@@ -1405,6 +1400,8 @@ void THD::init(void)
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
 
+  user_time.val= start_time= start_time_sec_part= 0;
+
   server_status= SERVER_STATUS_AUTOCOMMIT;
   if (variables.sql_mode & MODE_NO_BACKSLASH_ESCAPES)
     server_status|= SERVER_STATUS_NO_BACKSLASH_ESCAPES;
@@ -1425,10 +1422,16 @@ void THD::init(void)
   reset_binlog_local_stmt_filter();
   set_status_var_init();
   bzero((char *) &org_status_var, sizeof(org_status_var));
+  status_in_global= 0;
   start_bytes_received= 0;
   last_commit_gtid.seq_no= 0;
   last_stmt= NULL;
-  status_in_global= 0;
+  /* Reset status of last insert id */
+  arg_of_last_insert_id_function= FALSE;
+  stmt_depends_on_first_successful_insert_id_in_prev_stmt= FALSE;
+  first_successful_insert_id_in_prev_stmt= 0;
+  first_successful_insert_id_in_prev_stmt_for_binlog= 0;
+  first_successful_insert_id_in_cur_stmt= 0;
 #ifdef WITH_WSREP
   wsrep_exec_mode= wsrep_applier ? REPL_RECV :  LOCAL_STATE;
   wsrep_conflict_state= NO_CONFLICT;
@@ -1547,12 +1550,14 @@ void THD::init_for_queries()
 
 void THD::change_user(void)
 {
-  add_status_to_global();
+  if (!status_in_global)                        // Reset in init()
+    add_status_to_global();
 
-  cleanup();
-  reset_killed();
+  if (!cleanup_done)
+    cleanup();
   cleanup_done= 0;
-  status_in_global= 0;
+  reset_killed();
+  thd_clear_errors(this);
   init();
   stmt_map.reset();
   my_hash_init(&user_vars, system_charset_info, USER_VARS_HASH_SIZE, 0, 0,
@@ -1582,7 +1587,7 @@ void THD::cleanup(void)
   locked_tables_list.unlock_locked_tables(this);
 
   delete_dynamic(&user_var_events);
-  close_temporary_tables(this);
+  close_temporary_tables();
 
   transaction.xid_state.xa_state= XA_NOTR;
   trans_rollback(this);
@@ -1616,6 +1621,8 @@ void THD::cleanup(void)
   my_hash_free(&user_vars);
   sp_cache_clear(&sp_proc_cache);
   sp_cache_clear(&sp_func_cache);
+  auto_inc_intervals_forced.empty();
+  auto_inc_intervals_in_cur_stmt_for_binlog.empty();
 
   mysql_ull_cleanup(this);
   /* All metadata locks must have been released by now. */
@@ -1624,6 +1631,65 @@ void THD::cleanup(void)
   apc_target.destroy();
   cleanup_done=1;
   DBUG_VOID_RETURN;
+}
+
+
+/*
+  Free all connection related resources associated with a THD.
+  This is used when we put a thread into the thread cache.
+  After this call should either call ~THD or reset_for_reuse() depending on
+  circumstances.
+*/
+
+void THD::free_connection()
+{
+  DBUG_ASSERT(free_connection_done == 0);
+  my_free(db);
+  db= NULL;
+#ifndef EMBEDDED_LIBRARY
+  if (net.vio)
+    vio_delete(net.vio);
+  net.vio= 0;
+  net_end(&net);
+#endif
+ if (!cleanup_done)
+   cleanup();
+  ha_close_connection(this);
+  plugin_thdvar_cleanup(this);
+  mysql_audit_free_thd(this);
+  main_security_ctx.destroy();
+  /* close all prepared statements, to save memory */
+  stmt_map.reset();
+  free_connection_done= 1;
+  profiling.restart();                          // Reset profiling
+}
+
+/*
+  Reset thd for reuse by another connection
+  This is only used for user connections, so the following variables doesn't
+  have to be reset:
+  - Replication (slave) variables.
+  - Variables not reset between each statements. See reset_for_next_command.
+*/
+
+void THD::reset_for_reuse()
+{
+  mysql_audit_init_thd(this);
+  change_user();                                // Calls cleanup() & init()
+  get_stmt_da()->reset_diagnostics_area();
+  main_security_ctx.init();  
+  failed_com_change_user= 0;
+  is_fatal_error= 0;
+  client_capabilities= 0;
+  peer_port= 0;
+  query_name_consts= 0;                         // Safety
+  abort_on_warning= 0;
+  free_connection_done= 0;
+  m_command= COM_CONNECT;
+  profiling.reset();
+#ifdef SIGNAL_WITH_VIO_CLOSE
+  active_vio = 0;
+#endif
 }
 
 
@@ -1653,26 +1719,13 @@ THD::~THD()
   mysql_mutex_lock(&LOCK_wsrep_thd);
   mysql_mutex_unlock(&LOCK_wsrep_thd);
   mysql_mutex_destroy(&LOCK_wsrep_thd);
-  if (wsrep_rgi) delete wsrep_rgi;
+  delete wsrep_rgi;
 #endif
-  /* Close connection */
-#ifndef EMBEDDED_LIBRARY
-  if (net.vio)
-    vio_delete(net.vio);
-  net_end(&net);
-#endif
-  stmt_map.reset();                     /* close all prepared statements */
-  if (!cleanup_done)
-    cleanup();
+  if (!free_connection_done)
+    free_connection();
 
   mdl_context.destroy();
-  ha_close_connection(this);
-  mysql_audit_release(this);
-  plugin_thdvar_cleanup(this);
 
-  main_security_ctx.destroy();
-  my_free(db);
-  db= NULL;
   free_root(&transaction.mem_root,MYF(0));
   mysql_cond_destroy(&COND_wakeup_ready);
   mysql_mutex_destroy(&LOCK_wakeup_ready);
@@ -1692,7 +1745,6 @@ THD::~THD()
     rli_fake= NULL;
   }
   
-  mysql_audit_free_thd(this);
   if (rgi_slave)
     rgi_slave->cleanup_after_session();
   my_free(semisync_info);
@@ -1716,6 +1768,7 @@ THD::~THD()
   }
   update_global_memory_status(status_var.global_memory_used);
   set_current_thd(orig_thd == this ? 0 : orig_thd);
+  dec_thread_count();
   DBUG_VOID_RETURN;
 }
 
@@ -1730,7 +1783,7 @@ THD::~THD()
 
   NOTES
     This function assumes that all variables at start are long/ulong and
-    other types are handled explicitely
+    other types are handled explicitly
 */
 
 void add_to_status(STATUS_VAR *to_var, STATUS_VAR *from_var)
@@ -1762,11 +1815,10 @@ void add_to_status(STATUS_VAR *to_var, STATUS_VAR *from_var)
     DBUG_PRINT("info", ("global memory_used: %lld  size: %lld",
                         (longlong) global_status_var.global_memory_used,
                         (longlong) from_var->global_memory_used));
+    update_global_memory_status(from_var->global_memory_used);
   }
-  // workaround for gcc 4.2.4-1ubuntu4 -fPIE (from DEB_BUILD_HARDENING=1)
-  int64 volatile * volatile ptr= &to_var->global_memory_used;
-  my_atomic_add64_explicit(ptr, from_var->global_memory_used,
-                           MY_MEMORY_ORDER_RELAXED);
+  else
+   to_var->global_memory_used+= from_var->global_memory_used;
 }
 
 /*
@@ -1780,7 +1832,7 @@ void add_to_status(STATUS_VAR *to_var, STATUS_VAR *from_var)
   
   NOTE
     This function assumes that all variables at start are long/ulong and
-    other types are handled explicitely
+    other types are handled explicitly
 */
 
 void add_diff_to_status(STATUS_VAR *to_var, STATUS_VAR *from_var,
@@ -2091,7 +2143,16 @@ bool THD::store_globals()
     Let mysqld define the thread id (not mysys)
     This allows us to move THD to different threads if needed.
   */
-  mysys_var->id= thread_id;
+  mysys_var->id=      thread_id;
+
+  /* thread_dbug_id should not change for a THD */
+  if (!thread_dbug_id)
+    thread_dbug_id= mysys_var->dbug_id;
+  else
+  {
+    /* This only changes if we are using pool-of-threads */
+    mysys_var->dbug_id= thread_dbug_id;
+  }
 #ifdef __NR_gettid
   os_thread_id= (uint32)syscall(__NR_gettid);
 #else
@@ -2108,7 +2169,7 @@ bool THD::store_globals()
     We have to call thr_lock_info_init() again here as THD may have been
     created in another thread
   */
-  thr_lock_info_init(&lock_info);
+  thr_lock_info_init(&lock_info, mysys_var);
 
   return 0;
 }
@@ -4258,7 +4319,8 @@ void THD::restore_backup_open_tables_state(Open_tables_backup *backup)
     Before we will throw away current open tables state we want
     to be sure that it was properly cleaned up.
   */
-  DBUG_ASSERT(open_tables == 0 && temporary_tables == 0 &&
+  DBUG_ASSERT(open_tables == 0 &&
+              temporary_tables == 0 &&
               derived_tables == 0 &&
               lock == 0 &&
               locked_tables_mode == LTM_NONE &&
@@ -6918,24 +6980,6 @@ THD::signal_wakeup_ready()
   wakeup_ready= true;
   mysql_mutex_unlock(&LOCK_wakeup_ready);
   mysql_cond_signal(&COND_wakeup_ready);
-}
-
-
-void THD::rgi_lock_temporary_tables()
-{
-  mysql_mutex_lock(&rgi_slave->rli->data_lock);
-  temporary_tables= rgi_slave->rli->save_temporary_tables;
-}
-
-void THD::rgi_unlock_temporary_tables()
-{
-  rgi_slave->rli->save_temporary_tables= temporary_tables;
-  mysql_mutex_unlock(&rgi_slave->rli->data_lock);
-}
-
-bool THD::rgi_have_temporary_tables()
-{
-  return rgi_slave->rli->save_temporary_tables != 0;
 }
 
 
