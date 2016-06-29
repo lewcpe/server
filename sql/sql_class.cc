@@ -1687,9 +1687,7 @@ void THD::reset_for_reuse()
   free_connection_done= 0;
   m_command= COM_CONNECT;
   profiling.reset();
-#ifdef SIGNAL_WITH_VIO_CLOSE
-  active_vio = 0;
-#endif
+  active_mysql = 0;
 }
 
 
