@@ -258,6 +258,15 @@ DROP TABLE t2;
 DROP TABLE t3;
 
 #
+# speed test
+#
+set global max_allowed_packet=1024*1024*1024;
+connect (con1,localhost,root);
+select json_object(repeat("a",1024*1024*1024-1)) > 1;
+connection default;
+set global max_allowed_packet=default;
+
+#
 # Clean up
 #
 --source json_udf2.inc

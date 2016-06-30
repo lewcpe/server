@@ -647,3 +647,8 @@ Json_Object_List(Json_File('test/fx.json', '[3]:size'))
 DROP TABLE t1;
 DROP TABLE t2;
 DROP TABLE t3;
+set global max_allowed_packet=1024*1024*1024;
+select json_object(repeat("a",1024*1024*1024-1)) > 1;
+json_object(repeat("a",1024*1024*1024-1)) > 1
+0
+set global max_allowed_packet=default;
