@@ -4170,7 +4170,7 @@ Prepared_statement::execute_bulk_loop(String *expanded_query,
   }
 
 #ifdef NOT_YET_FROM_MYSQL_5_6
-  if (unlikely(thd->security_ctx->password_expired && 
+  if (unlikely(thd->security_ctx->password_expired &&
                !lex->is_change_password))
   {
     my_error(ER_MUST_CHANGE_PASSWORD, MYF(0));
