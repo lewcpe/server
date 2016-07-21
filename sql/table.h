@@ -683,6 +683,7 @@ struct TABLE_SHARE
   bool non_determinstic_insert;
   bool virtual_stored_fields;
   bool check_set_initialized;
+  bool has_session_func_vcols;
   bool has_update_default_function;
   bool has_insert_default_function;
   ulong table_map_id;                   /* for row-based replication */
@@ -2631,6 +2632,7 @@ enum open_frm_error open_table_from_share(THD *thd, TABLE_SHARE *share,
                        const char *alias, uint db_stat, uint prgflag,
                        uint ha_open_flags, TABLE *outparam,
                        bool is_create_table);
+bool fix_session_vcol_expr(THD *thd, Virtual_column_info *vcol);
 Virtual_column_info *unpack_vcol_info_from_frm(THD *thd, MEM_ROOT *mem_root,
                                                TABLE *table,
                                                Field *field,
